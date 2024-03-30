@@ -208,7 +208,7 @@
 //    else if (clutter_removal == "mti") {
 //        // [ ] 实现移动目标指示（MTI）滤波
 //    }
-//    
+//
 //    // 速度轮廓的FFT(range_profile(n_RX, n_chirps, n_frames) -> speed_profile(n_RX, M, n_frames))
 //    plan = fftw_plan_dft_1d(M, speed_profile[0][0][0], speed_profile[0][0][0], FFTW_FORWARD, FFTW_ESTIMATE);
 //    fftw_complex* temp = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
@@ -273,7 +273,7 @@
 //            }
 //        }
 //    }
-//    
+//
 //    // 使用matplotlibcpp绘制range_profile_compressed
 // //   std::vector<double> x(N), y(N);
 // //   for (int i = 0; i < N; i++) {

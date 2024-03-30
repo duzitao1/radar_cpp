@@ -134,7 +134,7 @@
 //            //printf("当前缓冲区填充大小为 %d \n", buff_ptrs[0] - buff_begins[0]);
 //            //printf("字节新：%d，字节旧：%d，正在填充 %d \n", bytenum_new, bytenum_prev, (int)(bytenum_new - bytenum_prev));
 //            //std::fill(buff_ptrs[0], buff_ptrs[0] + (int)(bytenum_new - bytenum_prev), 0);
-//            
+//
 //            for (int i = seqnum_prev + 1; i < seqnum_new; i++)
 //            {
 //                output_file.write(&*zeros.begin(), packetsize);
