@@ -107,16 +107,17 @@ void receive_data(SOCKET s, std::vector<short>& t_data, std::vector<std::vector<
 void inference_model(Ort::Session& session, std::vector<std::string>& input_names, std::vector<std::vector<float>>& input_tensor_values_list, std::vector<std::int64_t>& input_shapes, std::vector<std::string>& output_names, std::vector<short>& t_data, std::vector<std::vector<std::vector<std::vector<mmwave_handle::Complex>>>>& data_radar, int& cnt)
 {
 	std::vector<std::vector<std::vector<std::vector<mmwave_handle::Complex>>>> data_radar_local;
-	std::vector<std::vector<float>> input_tensor_values_list_local;
-	// 记录当前已预测个数
-	float p_cnt = 0;
-	// 预测成功个数
-	float cnt_success = 0;
-	// 准确率
-	float accuracy = 0;
+	std::vector<std::vector<float>> input_tensor_values_list_local(3, std::vector<float>(1920, 0));
+	// 存储上一个数据
+	std::vector<std::vector<float>> input_tensor_values_list_local_old(3, std::vector<float>(1920, 0));
+	// 存储需要推理的数据(初始化为(3, 1920)的0矩阵)
+	std::vector<std::vector<float>> input_tensor_values_list_local_temp(3, std::vector<float>(1920, 0));
 	float* output_data;
 	double max_value = 0;
 	int max_index = 0;
+
+	bool status = true;
+
 
 	while (1)
 	{
@@ -130,6 +131,41 @@ void inference_model(Ort::Session& session, std::vector<std::string>& input_name
 
 			// 特征提取
 			input_tensor_values_list_local = mmwave_handle::feature_extraction(data_radar_local, "avg");
+
+			if (status == true) {
+				input_tensor_values_list_local_old = input_tensor_values_list_local;
+				status = false;
+			}
+
+			// 起始时间(一共4个时间窗口)
+			for (int t = 0; t <= 30; t += 10)
+			{
+				std::cout << "t: " << t << std::endl;
+				int cnt = 0;
+
+				for (int i = t; i < t + 30; i++) {
+					if (i < 30) {
+						for (int j = 0; j < 64; j++) {
+							for (int k = 0; k < 3; k++) {
+								input_tensor_values_list_local_temp[k][cnt++] = (input_tensor_values_list_local_old[k][i * 64 + j]);
+							}
+						}
+					}
+					else {
+						for (int j = 0; j < 64; j++) {
+							for(int k=0;k<3;k++)
+								input_tensor_values_list_local_temp[k][cnt++] = input_tensor_values_list_local[k][(i - 30) * 64 + j];
+						}
+					}
+				}
+				// 输出input_tensor_values_list_local的形状
+				std::cout<< "input_tensor_values_list_local_temp: " << input_tensor_values_list_local_temp.size() << " " << input_tensor_values_list_local_temp[0].size() << std::endl;
+
+
+				//output_data = run_model_with_input(session, input_names, input_tensor_values_list_local_temp, input_shapes, output_names);
+				//for (int i = 0; i < 10; i++)
+				//	std::cout << output_data[i] << " ";
+			}
 
 			// 运行推理
 			output_data = run_model_with_input(session, input_names, input_tensor_values_list_local, input_shapes, output_names);
@@ -151,14 +187,11 @@ void inference_model(Ort::Session& session, std::vector<std::string>& input_name
 					max_index = i;
 				}
 			}
-			// 如果是1,说明正确
-			if (max_index == 1)
-			{
-				cnt_success++;
-			}
-			p_cnt++;
-			std::cout << "准确率: " << static_cast<float>(cnt_success) / p_cnt << std::endl;
-			std::cout << "max_index: " << max_index << std::endl;
+
+			//if(max_index != 4)
+				std::cout << "max_index: " << max_index << std::endl;
+			
+			input_tensor_values_list_local_old = input_tensor_values_list_local;
 		}
 	}
 }

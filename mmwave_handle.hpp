@@ -94,6 +94,104 @@ namespace mmwave_handle {
 	}
 
 	/**
+	 * @brief 从压缩的轮廓中提取特征向量。
+	 *
+	 * 此函数从三个压缩的轮廓：range_profile_compressed、speed_profile_compressed 和 angle_profile_compressed
+	 * 中提取特征向量。每个轮廓包含多个帧，每个帧包含多个数据点。函数将每个轮廓的数据点连接成单独的特征向量。
+	 *
+	 * @param range_profile_compressed 包含压缩的距离轮廓的二维向量。
+	 * @param speed_profile_compressed 包含压缩的速度轮廓的二维向量。
+	 * @param angle_profile_compressed 包含压缩的角度轮廓的二维向量。
+	 * @return 包含三个特征向量（距离、速度、角度）的二维向量。
+	 */
+	std::vector<std::vector<float>> extract_feature_vector(
+		std::vector<std::vector<float>>& range_profile_compressed,
+		std::vector<std::vector<float>>& speed_profile_compressed,
+		std::vector<std::vector<float>>& angle_profile_compressed
+		)
+	{
+		std::vector<std::vector<float>> feature_vector(3);
+
+		// 提取 range_profile_compressed
+		for (int i = 0; i < n_frames; ++i) {
+			for (int j = 0; j < N; ++j) {
+				feature_vector[0].push_back(range_profile_compressed[i][j]);
+			}
+		}
+
+		// 提取 speed_profile_compressed
+		for (int i = 0; i < n_frames; ++i) {
+			for (int j = 0; j < M; ++j) {
+				feature_vector[1].push_back(speed_profile_compressed[i][j]);
+			}
+		}
+
+		// 提取 angle_profile_compressed
+		for (int i = 0; i < n_frames; ++i) {
+			for (int j = 0; j < Q; ++j) {
+				feature_vector[2].push_back(angle_profile_compressed[i][j]);
+			}
+		}
+
+		return feature_vector;
+	}
+
+	/**
+	 * @brief 从特征向量中重构压缩的轮廓。
+	 *
+	 * 此函数从三个特征向量中重构压缩的轮廓：range_profile_compressed、speed_profile_compressed 和 angle_profile_compressed。
+	 * 每个轮廓包含多个帧，每个帧包含多个数据点。
+	 *
+	 * @param feature_vector 包含三个特征向量（距离、速度、角度）的二维向量。
+	 * @param n_frames 每个轮廓中的帧数（输入）。
+	 * @param N 每个距离轮廓帧中的数据点数（输入）。
+	 * @param M 每个速度轮廓帧中的数据点数（输入）。
+	 * @param Q 每个角度轮廓帧中的数据点数（输入）。
+	 * @param[out] range_profile_compressed 重构的距离轮廓。
+	 * @param[out] speed_profile_compressed 重构的速度轮廓。
+	 * @param[out] angle_profile_compressed 重构的角度轮廓。
+	 */
+	void reconstruct_profiles(
+		const std::vector<std::vector<float>>& feature_vector,
+		int n_frames, int N, int M, int Q,
+		std::vector<std::vector<float>>& range_profile_compressed,
+		std::vector<std::vector<float>>& speed_profile_compressed,
+		std::vector<std::vector<float>>& angle_profile_compressed)
+	{
+		// 清空原始轮廓
+		range_profile_compressed.clear();
+		speed_profile_compressed.clear();
+		angle_profile_compressed.clear();
+
+		// 重构 range_profile_compressed
+		for (int i = 0; i < n_frames; ++i) {
+			std::vector<float> frame_data(N);
+			for (int j = 0; j < N; ++j) {
+				frame_data[j] = feature_vector[0][i * N + j];
+			}
+			range_profile_compressed.push_back(frame_data);
+		}
+
+		// 重构 speed_profile_compressed
+		for (int i = 0; i < n_frames; ++i) {
+			std::vector<float> frame_data(M);
+			for (int j = 0; j < M; ++j) {
+				frame_data[j] = feature_vector[1][i * M + j];
+			}
+			speed_profile_compressed.push_back(frame_data);
+		}
+
+		// 重构 angle_profile_compressed
+		for (int i = 0; i < n_frames; ++i) {
+			std::vector<float> frame_data(Q);
+			for (int j = 0; j < Q; ++j) {
+				frame_data[j] = feature_vector[2][i * Q + j];
+			}
+			angle_profile_compressed.push_back(frame_data);
+		}
+	}
+
+	/**
 	 * @brief 从二进制文件中读取雷达原始数据，并将其重塑为指定形状的复数形式。
 	 *
 	 * @param filename    输入的二进制文件名。
@@ -301,9 +399,9 @@ namespace mmwave_handle {
 	// 从feature_vector中提取range_profile, speed_profile, angle_profile,然后进行图像绘制
 	void plot_features(const std::vector<std::vector<float>>& feature_vector) {
 		// 提取range_profile, speed_profile, angle_profile
-		std::vector<std::vector<double>> range_profile(mmwave_handle::n_frames, std::vector<double>(mmwave_handle::N));
-		std::vector<std::vector<double>> speed_profile(mmwave_handle::n_frames, std::vector<double>(mmwave_handle::M));
-		std::vector<std::vector<double>> angle_profile(mmwave_handle::n_frames, std::vector<double>(mmwave_handle::Q));
+		std::vector<std::vector<float>> range_profile(mmwave_handle::n_frames, std::vector<float>(mmwave_handle::N));
+		std::vector<std::vector<float>> speed_profile(mmwave_handle::n_frames, std::vector<float>(mmwave_handle::M));
+		std::vector<std::vector<float>> angle_profile(mmwave_handle::n_frames, std::vector<float>(mmwave_handle::Q));
 
 		for (int i = 0; i < mmwave_handle::n_frames; ++i) {
 			for (int j = 0; j < mmwave_handle::N; ++j) {
@@ -314,19 +412,19 @@ namespace mmwave_handle {
 		}
 
 		// 查找range_profile_compressed的最大值
-		double range_profile_max = 0;
+		float range_profile_max = 0;
 		for (int i = 0; i < mmwave_handle::n_frames; ++i) {
 			for (int j = 0; j < mmwave_handle::N; ++j) {
 				range_profile_max = max(range_profile_max, range_profile[i][j]);
 			}
 		}
-		double speed_profile_max = 0;
+		float speed_profile_max = 0;
 		for (int i = 0; i < mmwave_handle::n_frames; ++i) {
 			for (int j = 0; j < mmwave_handle::M; ++j) {
 				speed_profile_max = max(speed_profile_max, speed_profile[i][j]);
 			}
 		}
-		double angle_profile_max = 0;
+		float angle_profile_max = 0;
 		for (int i = 0; i < mmwave_handle::n_frames; ++i) {
 			for (int j = 0; j < mmwave_handle::Q; ++j) {
 				angle_profile_max = max(angle_profile_max, angle_profile[i][j]);
@@ -482,8 +580,6 @@ namespace mmwave_handle {
 
 		// 杂波去除
 		if (clutter_removal == "avg") {
-			// [ ] 使用平均方法实现杂波去除
-			cout << "杂波去除" << endl;
 			// range_profile(n_RX, n_chirps, n_frames, N) -> range_profile(n_RX, n_chirps, n_frames, N)
 			//range_profile = range_profile - np.mean(range_profile, axis = 3)[:, : , np.newaxis, : ]
 			for (int i = 0; i < n_frames; ++i) {
@@ -547,9 +643,9 @@ namespace mmwave_handle {
 		fftw_free(temp);
 
 		// 压缩维度
-		std::vector<std::vector<double>> range_profile_compressed(n_frames, std::vector<double>(N));
-		std::vector<std::vector<double>> speed_profile_compressed(n_frames, std::vector<double>(M));
-		std::vector<std::vector<double>> angle_profile_compressed(n_frames, std::vector<double>(Q));
+		std::vector<std::vector<float>> range_profile_compressed(n_frames, std::vector<float>(N));
+		std::vector<std::vector<float>> speed_profile_compressed(n_frames, std::vector<float>(M));
+		std::vector<std::vector<float>> angle_profile_compressed(n_frames, std::vector<float>(Q));
 
 		// 压缩range_profile
 		for (int i = 0; i < n_RX; ++i) {
@@ -584,22 +680,7 @@ namespace mmwave_handle {
 			}
 		}
 
-		std::vector<std::vector<float>> feature_vector(3);
-		for (int i = 0; i < n_frames; ++i) {
-			for (int j = 0; j < N; ++j) {
-				feature_vector[0].push_back(range_profile_compressed[i][j]);
-			}
-		}
-		for (int i = 0; i < n_frames; ++i) {
-			for (int j = 0; j < M; ++j) {
-				feature_vector[1].push_back(speed_profile_compressed[i][j]);
-			}
-		}
-		for (int i = 0; i < n_frames; ++i) {
-			for (int j = 0; j < Q; ++j) {
-				feature_vector[2].push_back(angle_profile_compressed[i][j]);
-			}
-		}
+		std::vector<std::vector<float>> feature_vector = extract_feature_vector(range_profile_compressed, speed_profile_compressed, angle_profile_compressed);
 
 		//释放内存
 		for (int i = 0; i < n_RX; ++i) {
