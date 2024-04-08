@@ -237,151 +237,59 @@ namespace mmwave_handle {
 		}
 		fftw_free(temp);
 	}
+
 	/**
-	 * @brief 绘制range_profile_compressed的热图
+	 * @brief 查找二维数据的最大值。
 	 *
-	 * @param range_profile_compressed 二维向量，包含压缩的range profile数据
-	 * @param n_frames 数据的行数
-	 * @param N 数据的列数
+	 * @tparam T 数据类型
+	 * @param data_2d 二维数据
+	 * @return 最大值
 	 */
-	void plot_range_profile_compressed(const std::vector<std::vector<double>>& range_profile_compressed, int n_frames, int N) {
-		// 初始化图像数据数组
-		int rows = n_frames;
-		int columns = N;
-		unsigned char* image_data_gray = new unsigned char[rows * columns];
-
-		// 查找range_profile_compressed的最大值
-		double range_profile_max = 0;
-		for (int i = 0; i < n_frames; ++i) {
-			for (int j = 0; j < N; ++j) {
-				range_profile_max = max(range_profile_max, range_profile_compressed[i][j]);
+	template<typename T>
+	T find_max_value(const std::vector<std::vector<T>>& data_2d) {
+		T max_value = 0;
+		for (const auto& row : data_2d) {
+			for (T value : row) {
+				max_value = std::max(max_value, value);
 			}
 		}
-		std::cout << "range_profile_max: " << range_profile_max << std::endl;
-
-		// 转换range_profile_compressed到图像数据范围(0-255)
-		int ccnt = 0;
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < columns; ++j) {
-				image_data_gray[ccnt++] = static_cast<unsigned char>(range_profile_compressed[i][j] / range_profile_max * 255);
-			}
-		}
-
-		// 设置imshow参数并显示图像
-		std::map<std::string, std::string> imshow_params = {
-			{"cmap", "jet"},
-			{"aspect", "auto"}
-		};
-		plt::imshow(image_data_gray, rows, columns, 1, imshow_params);
-		plt::title("Gray Scale Image");
-		plt::show();
-
-		// 释放动态分配的内存
-		delete[] image_data_gray;
-	}
-
-	void plot_speed_profile_compressed(const std::vector<std::vector<double>>& speed_profile_compressed, int n_frames, int M) {
-		// 初始化图像数据数组
-		int rows = n_frames;
-		int columns = M;
-		unsigned char* image_data_gray = new unsigned char[rows * columns];
-
-		// 查找speed_profile_compressed的最大值
-		double speed_profile_max = 0;
-		for (int i = 0; i < n_frames; ++i) {
-			for (int j = 0; j < M; ++j) {
-				speed_profile_max = max(speed_profile_max, speed_profile_compressed[i][j]);
-			}
-		}
-		std::cout << "speed_profile_max: " << speed_profile_max << std::endl;
-
-		// 转换speed_profile_compressed到图像数据范围(0-255)
-		int ccnt = 0;
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < columns; ++j) {
-				image_data_gray[ccnt++] = static_cast<unsigned char>(speed_profile_compressed[i][j] / speed_profile_max * 255);
-			}
-		}
-
-		// 设置imshow参数并显示图像
-		std::map<std::string, std::string> imshow_params = {
-			{"cmap", "jet"},
-			{"aspect", "auto"}
-		};
-		plt::imshow(image_data_gray, rows, columns, 1, imshow_params);
-		plt::title("Gray Scale Image");
-		plt::show();
-
-		// 释放动态分配的内存
-		delete[] image_data_gray;
-	}
-
-	void plot_angle_profile_compressed(const std::vector<std::vector<double>>& angle_profile_compressed, int n_frames, int Q) {
-		// 初始化图像数据数组
-		int rows = n_frames;
-		int columns = Q;
-		unsigned char* image_data_gray = new unsigned char[rows * columns];
-
-		// 查找angle_profile_compressed的最大值
-		double angle_profile_max = 0;
-		for (int i = 0; i < n_frames; ++i) {
-			for (int j = 0; j < Q; ++j) {
-				angle_profile_max = max(angle_profile_max, angle_profile_compressed[i][j]);
-			}
-		}
-		std::cout << "angle_profile_max: " << angle_profile_max << std::endl;
-
-		// 转换angle_profile_compressed到图像数据范围(0-255)
-		int ccnt = 0;
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < columns; ++j) {
-				image_data_gray[ccnt++] = static_cast<unsigned char>(angle_profile_compressed[i][j] / angle_profile_max * 255);
-			}
-		}
-
-		// 设置imshow参数并显示图像
-		std::map<std::string, std::string> imshow_params = {
-			{"cmap", "jet"},
-			{"aspect", "auto"}
-		};
-		plt::imshow(image_data_gray, rows, columns, 1, imshow_params);
-		plt::title("Gray Scale Image");
-		plt::show();
-
-		// 释放动态分配的内存
-		delete[] image_data_gray;
+		return max_value;
 	}
 
 	/**
-	 * @brief 绘制压缩的数据的热图
+	 * @brief 将二维数据压缩并转换为图像数据范围(0-255)。
 	 *
-	 * @param compressed_data 二维向量，包含压缩的数据
-	 * @param n_frames 数据的行数
-	 * @param N 数据的列数
+	 * @tparam T 数据类型
+	 * @param data_2d 二维数据
+	 * @param image_data_gray 图像数据数组
+	 */
+	template<typename T>
+	void compress_to_image_data(const std::vector<std::vector<T>>& data_2d, unsigned char*& image_data_gray) {
+		int ccnt = 0;
+		T max_value = find_max_value(data_2d);
+		for (const auto& row : data_2d) {
+			for (T value : row) {
+				image_data_gray[ccnt++] = static_cast<unsigned char>(value / max_value * 255);
+			}
+		}
+	}
+
+	/**
+	 * @brief 绘制压缩的数据的热图。
+	 *
+	 * @tparam T 数据类型
+	 * @param data2d 二维向量，包含压缩的数据
+	 * @param rows 数据的行数
+	 * @param columns 数据的列数
 	 * @param cmap 颜色映射名称
+	 * @param title 图像标题
 	 */
-	void plot_compressed_data(const std::vector<std::vector<double>>& compressed_data, int n_frames, int N, const std::string& cmap = "jet") {
-		// 初始化图像数据数组
-		int rows = n_frames;
-		int columns = N;
+	template<typename T>
+	void plot_data2d(const std::vector<std::vector<T>>& data2d, int rows, int columns, const std::string& cmap = "jet", const std::string& title = "Image") {
 		unsigned char* image_data_gray = new unsigned char[rows * columns];
-
-		// 查找compressed_data的最大值
-		double max_value = 0;
-		for (int i = 0; i < n_frames; ++i) {
-			for (int j = 0; j < N; ++j) {
-				max_value = max(max_value, compressed_data[i][j]);
-			}
-		}
-		std::cout << "max_value: " << max_value << std::endl;
 
 		// 转换compressed_data到图像数据范围(0-255)
-		int ccnt = 0;
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < columns; ++j) {
-				image_data_gray[ccnt++] = static_cast<unsigned char>(compressed_data[i][j] / max_value * 255);
-			}
-		}
+		compress_to_image_data(data2d, image_data_gray);
 
 		// 设置imshow参数并显示图像
 		std::map<std::string, std::string> imshow_params = {
@@ -389,95 +297,81 @@ namespace mmwave_handle {
 			{"aspect", "auto"}
 		};
 		plt::imshow(image_data_gray, rows, columns, 1, imshow_params);
-		plt::title("Gray Scale Image");
-		plt::show();
+		plt::title(title);
 
 		// 释放动态分配的内存
 		delete[] image_data_gray;
 	}
 
+	/**
+ * @brief 提取特征向量中的range_profile, speed_profile, angle_profile。
+ *
+ * @tparam T 数据类型
+ * @param feature_vector 特征向量，包含range_profile, speed_profile, angle_profile
+ * @param n_frames 帧数
+ * @param N range_profile的列数
+ * @param M speed_profile的列数
+ * @param Q angle_profile的列数
+ * @return std::tuple<std::vector<std::vector<T>>, std::vector<std::vector<T>>, std::vector<std::vector<T>>>
+ *         返回range_profile, speed_profile, angle_profile的二维向量
+ */
+	template<typename T>
+	std::tuple<std::vector<std::vector<T>>, std::vector<std::vector<T>>, std::vector<std::vector<T>>>
+		extract_profiles(const std::vector<std::vector<T>>& feature_vector, int n_frames, int N, int M, int Q) {
+		std::vector<std::vector<T>> range_profile(n_frames, std::vector<T>(N));
+		std::vector<std::vector<T>> speed_profile(n_frames, std::vector<T>(M));
+		std::vector<std::vector<T>> angle_profile(n_frames, std::vector<T>(Q));
+
+		for (int i = 0; i < n_frames; ++i) {
+			for (int j = 0; j < N; ++j) {
+				range_profile[i][j] = feature_vector[0][i * N + j];
+			}
+		}
+
+		for (int i = 0; i < n_frames; ++i) {
+			for (int j = 0; j < M; ++j) {
+				speed_profile[i][j] = feature_vector[1][i * M + j];
+			}
+		}
+
+		for (int i = 0; i < n_frames; ++i) {
+			for (int j = 0; j < Q; ++j) {
+				angle_profile[i][j] = feature_vector[2][i * Q + j];
+			}
+		}
+
+		return std::make_tuple(range_profile, speed_profile, angle_profile);
+	}
+
+	/**
+	 * @brief 绘制range_profile_compressed的热图
+	 *
+	 * @param range_profile_compressed 二维向量，包含压缩的range profile数据
+	 * @param n_frames 数据的行数
+	 * @param N 数据的列数
+	 * @param cmap 颜色映射名称
+	 * @param title 图像标题
+	 */
+	void plot_range_profile_compressed(const std::vector<std::vector<float>>& range_profile_compressed, int n_frames, int N, const std::string& cmap = "jet", const std::string& title = "Range Profile") {
+		plot_data2d(range_profile_compressed, n_frames, N, cmap, title);
+	}
+	void plot_speed_profile_compressed(const std::vector<std::vector<float>>& speed_profile_compressed, int n_frames, int M, const std::string& cmap = "jet", const std::string& title = "Speed Profile") {
+		plot_data2d(speed_profile_compressed, n_frames, M, cmap, title);
+	}
+	void plot_angle_profile_compressed(const std::vector<std::vector<float>>& angle_profile_compressed, int n_frames, int Q, const std::string& cmap = "jet", const std::string& title = "Angle Profile") {
+		plot_data2d(angle_profile_compressed, n_frames, Q, cmap, title);
+	}
+
 	// 从feature_vector中提取range_profile, speed_profile, angle_profile,然后进行图像绘制
 	void plot_features(const std::vector<std::vector<float>>& feature_vector) {
-		// 提取range_profile, speed_profile, angle_profile
-		std::vector<std::vector<float>> range_profile(mmwave_handle::n_frames, std::vector<float>(mmwave_handle::N));
-		std::vector<std::vector<float>> speed_profile(mmwave_handle::n_frames, std::vector<float>(mmwave_handle::M));
-		std::vector<std::vector<float>> angle_profile(mmwave_handle::n_frames, std::vector<float>(mmwave_handle::Q));
+		auto [range_profile, speed_profile, angle_profile] = extract_profiles<float>(feature_vector, n_frames, N, M, Q);
 
-		for (int i = 0; i < mmwave_handle::n_frames; ++i) {
-			for (int j = 0; j < mmwave_handle::N; ++j) {
-				range_profile[i][j] = feature_vector[0][i * mmwave_handle::N + j];
-				speed_profile[i][j] = feature_vector[1][i * mmwave_handle::M + j];
-				angle_profile[i][j] = feature_vector[2][i * mmwave_handle::Q + j];
-			}
-		}
-
-		// 查找range_profile_compressed的最大值
-		float range_profile_max = 0;
-		for (int i = 0; i < mmwave_handle::n_frames; ++i) {
-			for (int j = 0; j < mmwave_handle::N; ++j) {
-				range_profile_max = max(range_profile_max, range_profile[i][j]);
-			}
-		}
-		float speed_profile_max = 0;
-		for (int i = 0; i < mmwave_handle::n_frames; ++i) {
-			for (int j = 0; j < mmwave_handle::M; ++j) {
-				speed_profile_max = max(speed_profile_max, speed_profile[i][j]);
-			}
-		}
-		float angle_profile_max = 0;
-		for (int i = 0; i < mmwave_handle::n_frames; ++i) {
-			for (int j = 0; j < mmwave_handle::Q; ++j) {
-				angle_profile_max = max(angle_profile_max, angle_profile[i][j]);
-			}
-		}
-
-		// 初始化图像数据数组
-		int rows = mmwave_handle::n_frames;
-		int columns = mmwave_handle::N;
-		unsigned char* image_data_gray = new unsigned char[rows * columns];
-
-		// 转换range_profile到图像数据范围(0-255)
-		int ccnt = 0;
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < columns; ++j) {
-				image_data_gray[ccnt++] = static_cast<unsigned char>(range_profile[i][j] / range_profile_max * 255);
-			}
-		}
-		plt::figure_size(1200, 400);
 		plt::subplot(1, 3, 1);
-		// 设置imshow参数并显示图像
-		std::map<std::string, std::string> imshow_params = {
-			{"cmap", "jet"},
-			{"aspect", "auto"}
-		};
-		plt::imshow(image_data_gray, rows, columns, 1, imshow_params);
-		plt::title("range_profile");
-
-		ccnt = 0;
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < columns; ++j) {
-				image_data_gray[ccnt++] = static_cast<unsigned char>(speed_profile[i][j] / speed_profile_max * 255);
-			}
-		}
+		plot_range_profile_compressed(range_profile, n_frames, N);
 		plt::subplot(1, 3, 2);
-		plt::imshow(image_data_gray, rows, columns, 1, imshow_params);
-		plt::title("speed_profile");
-
-		ccnt = 0;
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < columns; ++j) {
-				image_data_gray[ccnt++] = static_cast<unsigned char>(angle_profile[i][j] / angle_profile_max * 255);
-			}
-		}
+		plot_speed_profile_compressed(speed_profile, n_frames, M);
 		plt::subplot(1, 3, 3);
-
-		plt::imshow(image_data_gray, rows, columns, 1, imshow_params);
-		plt::title("angle_profile");
-
-		plt::show();
-
-		// 释放动态分配的内存
-		delete[] image_data_gray;
+		plot_angle_profile_compressed(angle_profile, n_frames, Q);
 	}
 
 	/**

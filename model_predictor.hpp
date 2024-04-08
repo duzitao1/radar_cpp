@@ -97,10 +97,6 @@ float* run_model_with_input(Ort::Session& session, const std::vector<std::string
 
 	// 打印输出张量
 	auto output_data = output_tensors[0].GetTensorMutableData<float>();
-	for (int i = 0; i < 10; ++i) {
-		std::cout << output_data[i] << " ";
-	}
-	std::cout << std::endl;
 
 	return output_data;
 }

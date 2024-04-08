@@ -1,316 +1,658 @@
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
-#define _CRT_SECURE_NO_WARNINGS
-
-#include<cstdio>
-#include<winsock2.h>
-#include<fstream>
-#include<vector>
-#include<complex>
-#include<synchapi.h>
-#include<io.h>
-#include<iostream>
-#include<vector>
-#include<array>
-#include <onnxruntime_cxx_api.h>
-
-#pragma comment(lib,"ws2_32.lib") //Winsock Library
-
-#include <thread>
-#include <mutex>
-
-#include "model_predictor.hpp"
-#include "mmwave_handle.hpp"
-#include "ThreadSafeQueue.hpp"
-
-//#define DEBUG
-
-#define BUFLEN 1476			//缓冲区的最大长度
-#ifdef DEBUG
-#define ADDR "127.0.0.1"	//用于通信的适配器的地址
-#else
-#define ADDR "192.168.33.30"
-#endif
-
-#define PORT 4098				//用于接收传入数据的端口
-#define boardid 0
-#define packetsize 1456   // 为减少时间开销，使用启发式值
-
-//ThreadSafeQueue<short*> data_queue; // 数据队列
-ThreadSafeQueue<std::vector<short>> data_queue; // 数据队列
-
-// cnt的互斥锁
-std::mutex cnt_mtx;
-// t_data的互斥锁
-std::mutex t_data_mtx;
-// data的互斥锁
-std::mutex data_mtx;
-
-// 数据接收函数
-void receive_data(SOCKET s, std::vector<short>& t_data, std::vector<std::vector<std::vector<std::vector<mmwave_handle::Complex>>>>& data_radar, int& cnt)
-{
-	char udpbuf[BUFLEN];
-	int recv_len;
-	int seqnum_new, bytenum_new;
-	int seqmum_old = 0;
-	int bytenum_old = 0;
-	// 丢包总数
-	int lost_cnt = 0;
-	// t_data.size()变量
-	int t_data_size = t_data.size();
-
-	// 用于存储数据
-	//short *data = new short[3916800];
-
-	std::vector<short> data(3916800);
-
-	while (1)
-	{
-		if ((recv_len = recvfrom(s, udpbuf, BUFLEN, 0, 0, 0)) == SOCKET_ERROR)
-		{
-			printf("recvfrom() 失败，错误代码：%d", WSAGetLastError());
-			exit(EXIT_FAILURE);
-		}
-		// 取出前4个字节，序列号
-		memcpy(&seqnum_new, udpbuf, 4);
-		memcpy(&bytenum_new, udpbuf + 4, 6);
-
-		cnt_mtx.lock();  // 锁定互斥锁
-		data_mtx.lock();  // 锁定互斥锁
-
-		if (cnt + (recv_len - 10) / 2 < 3916800)
-		{
-			memcpy(data.data() + cnt, udpbuf + 10, recv_len - 10);
-			cnt += (recv_len - 10) / 2;
-		}
-		else
-		{
-			memcpy(data.data() + cnt, udpbuf + 10, (3916800 - cnt) * 2);
-
-			// 将数据复制到新的vector并入队
-			std::vector<short> data_temp(data.begin(), data.end());
-			data_queue.enqueue(data_temp);
-
-			// 更新data
-			memcpy(data.data(), udpbuf + 10 + (3916800 - cnt) * 2, recv_len - 10 - (3916800 - cnt) * 2);
-			cnt = recv_len - 10 - (3916800 - cnt) * 2;
-
-			// 输出队列大小
-			//std::cout << "队列大小: " << data_queue.size() << std::endl;
-		}
-
-		data_mtx.unlock();  // 解锁互斥锁
-		cnt_mtx.unlock();  // 解锁互斥锁
-	}
-}
-
-// 模型推理函数
-void inference_model(Ort::Session& session, std::vector<std::string>& input_names, std::vector<std::vector<float>>& input_tensor_values_list, std::vector<std::int64_t>& input_shapes, std::vector<std::string>& output_names, std::vector<short>& t_data, std::vector<std::vector<std::vector<std::vector<mmwave_handle::Complex>>>>& data_radar, int& cnt)
-{
-	std::vector<std::vector<std::vector<std::vector<mmwave_handle::Complex>>>> data_radar_local;
-	std::vector<std::vector<float>> input_tensor_values_list_local(3, std::vector<float>(1920, 0));
-	// 存储上一个数据
-	std::vector<std::vector<float>> input_tensor_values_list_local_old(3, std::vector<float>(1920, 0));
-	// 存储需要推理的数据(初始化为(3, 1920)的0矩阵)
-	std::vector<std::vector<float>> input_tensor_values_list_local_temp(3, std::vector<float>(1920, 0));
-	float* output_data;
-	double max_value = 0;
-	int max_index = 0;
-
-	bool status = true;
-
-
-	while (1)
-	{
-		// 从队列中取出数据
-		if (!data_queue.empty())
-		{
-			std::vector<short> data_temp;
-			data_queue.try_dequeue(data_temp);
-
-			data_radar_local = mmwave_handle::reshape_data(data_temp);
-
-			// 特征提取
-			input_tensor_values_list_local = mmwave_handle::feature_extraction(data_radar_local, "avg");
-
-			if (status == true) {
-				input_tensor_values_list_local_old = input_tensor_values_list_local;
-				status = false;
-			}
-
-			// 起始时间(一共4个时间窗口)
-			for (int t = 0; t <= 30; t += 10)
-			{
-				std::cout << "t: " << t << std::endl;
-				int cnt = 0;
-
-				for (int i = t; i < t + 30; i++) {
-					if (i < 30) {
-						for (int j = 0; j < 64; j++) {
-							for (int k = 0; k < 3; k++) {
-								input_tensor_values_list_local_temp[k][cnt++] = (input_tensor_values_list_local_old[k][i * 64 + j]);
-							}
-						}
-					}
-					else {
-						for (int j = 0; j < 64; j++) {
-							for(int k=0;k<3;k++)
-								input_tensor_values_list_local_temp[k][cnt++] = input_tensor_values_list_local[k][(i - 30) * 64 + j];
-						}
-					}
-				}
-				// 输出input_tensor_values_list_local的形状
-				std::cout<< "input_tensor_values_list_local_temp: " << input_tensor_values_list_local_temp.size() << " " << input_tensor_values_list_local_temp[0].size() << std::endl;
-
-
-				//output_data = run_model_with_input(session, input_names, input_tensor_values_list_local_temp, input_shapes, output_names);
-				//for (int i = 0; i < 10; i++)
-				//	std::cout << output_data[i] << " ";
-			}
-
-			// 运行推理
-			output_data = run_model_with_input(session, input_names, input_tensor_values_list_local, input_shapes, output_names);
-
-			// 绘制特征
-			//plt::ion();
-			//mmwave_handle::plot_features(input_tensor_values_list_local);
-			//plt::pause(0.2);
-
-			// 找到最大值的索引
-			max_index = 0;
-			max_value = 0;
-
-			for (int i = 0; i < 10; i++)
-			{
-				if (output_data[i] > max_value)
-				{
-					max_value = output_data[i];
-					max_index = i;
-				}
-			}
-
-			//if(max_index != 4)
-				std::cout << "max_index: " << max_index << std::endl;
-			
-			input_tensor_values_list_local_old = input_tensor_values_list_local;
-		}
-	}
-}
-
-int main()
-{
-	//-----------------------------------------
-	//              初始化数据
-	//-----------------------------------------
-
-	std::vector<short> t_data(3916800);
-	int recv_len, seqnum_prev, seqnum_new;
-	int bytenum_prev = 0;
-	int bytenum_new = 0;
-	seqnum_prev = 0;    // 第一个包的序列号为 1
-
-	//一个计数器,用于记录当前data中的位置
-	int cnt = 0;
-	//-----------------------------------------
-	//              初始化 Winsock
-	//-----------------------------------------
-
-	SOCKET s;
-	struct sockaddr_in server;
-	char udpbuf[BUFLEN];
-	WSADATA wsa;
-
-	//初始化 Winsock
-	printf("\n正在初始化 Winsock...");
-	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
-	{
-		printf("失败。错误代码：%d", WSAGetLastError());
-		exit(EXIT_FAILURE);
-	}
-	printf("已初始化。\n");
-
-	//创建套接字
-	if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET)
-	{
-		printf("无法创建套接字：%d", WSAGetLastError());
-	}
-	printf("套接字已创建。\n");
-
-	//准备 sockaddr_in 结构
-	server.sin_family = AF_INET;
-	server.sin_addr.s_addr = inet_addr(ADDR);
-	server.sin_port = htons(PORT);
-
-	//绑定
-	if (bind(s, (struct sockaddr*)&server, sizeof(server)) == SOCKET_ERROR)
-	{
-		printf("绑定失败，错误代码：%d", WSAGetLastError());
-		exit(EXIT_FAILURE);
-	}
-	puts("绑定完成");
-
-	//-----------------------------------------
-	//              初始化模型
-	//-----------------------------------------
-
-	// 设置模型文件路径
-	std::basic_string<ORTCHAR_T> model_file = L"K:/aio_radar/avg_model.onnx";
-
-	// onnxruntime 设置
-	Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "example-model-explorer");
-	Ort::SessionOptions session_options;
-	Ort::Session session = Ort::Session(env, model_file.c_str(), session_options);
-
-	// 获取输入和输出节点名称/形状
-	Ort::AllocatorWithDefaultOptions allocator;
-	std::vector<std::string> input_names;
-	std::vector<std::int64_t> input_shapes;
-	for (std::size_t i = 0; i < session.GetInputCount(); i++) {
-		input_names.emplace_back(session.GetInputNameAllocated(i, allocator).get());
-		input_shapes = session.GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape();
-	}
-	for (auto& s : input_shapes) {
-		if (s < 0) {
-			s = 1;
-		}
-	}
-
-	std::vector<std::string> output_names;
-	for (std::size_t i = 0; i < session.GetOutputCount(); i++) {
-		output_names.emplace_back(session.GetOutputNameAllocated(i, allocator).get());
-		auto output_shapes = session.GetOutputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape();
-	}
-
-	// 创建data_radar
-	std::vector<std::vector<std::vector<std::vector<mmwave_handle::Complex>>>> data_radar(
-		mmwave_handle::n_RX, std::vector<std::vector<std::vector<mmwave_handle::Complex>>>(
-			mmwave_handle::n_samples, std::vector<std::vector<mmwave_handle::Complex>>(
-				mmwave_handle::n_chirps, std::vector<mmwave_handle::Complex>(mmwave_handle::n_frames)
-			)
-		)
-	);
-
-	std::vector<std::vector<float>> input_tensor_values_list;
-
-	//-----------------------------------------
-	//               开始监听
-	//-----------------------------------------
-
-	// 启动数据接收线程
-	std::thread recv_thread(receive_data, s, std::ref(t_data), std::ref(data_radar), std::ref(cnt));
-
-	// 启动模型推理线程
-	std::thread infer_thread(inference_model, std::ref(session), std::ref(input_names), std::ref(input_tensor_values_list), std::ref(input_shapes), std::ref(output_names), std::ref(t_data), std::ref(data_radar), std::ref(cnt));
-
-	// 等待线程结束
-	recv_thread.join();
-	infer_thread.join();
-
-	//-----------------------------------------
-	//              关闭 Winsock
-	//-----------------------------------------
-
-	closesocket(s);
-	WSACleanup();
-
-	return 0;
-}
+//#include <iostream>
+//#include <fstream>
+//#include <complex>
+//#include <vector>
+//#include <cmath>
+//#include <fftw3.h>
+//#include <opencv2/opencv.hpp>
+//#include <chrono>
+//#include <Windows.h>
+//#include <algorithm>
+//
+//#include "matplotlibcpp.h"
+//
+//namespace plt = matplotlibcpp;
+//
+//namespace mmwave_handle {
+//	typedef std::complex<double> Complex;  // 定义复数类型为双精度复数
+//
+//	constexpr int N = 64;
+//	constexpr int M = 64;
+//	constexpr int Q = 64;
+//	constexpr int numLanes = 4;
+//	constexpr int n_RX = 4;
+//	constexpr int n_samples = 64;
+//	constexpr int n_chirps = 255;
+//	constexpr int n_frames = 30;
+//	using namespace std;
+//	namespace plt = matplotlibcpp;
+//
+//	typedef complex<double> Complex;  // 定义复数类型为双精度复数
+//
+//	/**
+//	 * @brief 重塑ADC数据以匹配特定的数据结构。
+//	 *
+//	 * 此函数将输入的ADC数据重塑为一个四维复数向量数组。该数组用于表示雷达数据，
+//	 * 与特定的雷达数据格式相匹配。
+//	 *
+//	 * @param adcData 输入的ADC数据，一个包含原始数据的短整型向量。
+//	 * @return 一个四维复数向量数组，表示重塑后的雷达数据。
+//	 *
+//	 * @details
+//	 * - 首先，函数初始化一个四维向量数组`data_radar`，用于存储重塑后的雷达数据。
+//	 * - 接着，函数将ADC数据重塑为一个二维短整型向量数组`reshapedData`。
+//	 * - 最后，函数将重塑后的ADC数据转换为复数形式，并填充到`data_radar`中。
+//	 *
+//	 * @note
+//	 * - 输入的ADC数据大小应为 `n_RX * 2 * newCols`。
+//	 * - 该函数的实现基于特定的雷达数据结构和ADC数据格式。
+//	 *
+//	 * @warning
+//	 * - 在调用此函数之前，确保设置了`n_RX`, `n_samples`, `n_chirps`, 和 `n_frames`的值。
+//	 * - 输入的ADC数据应与预期的数据格式和大小相匹配。
+//	 */
+//	std::vector<std::vector<std::vector<std::vector<Complex>>>> reshape_data(const std::vector<short>& adcData) {
+//		// 初始化data_radar
+//		std::vector<std::vector<std::vector<std::vector<Complex>>>> data_radar(
+//			n_RX, std::vector<std::vector<std::vector<Complex>>>(
+//				n_samples, std::vector<std::vector<Complex>>(
+//					n_chirps, std::vector<Complex>(n_frames)
+//				)
+//			)
+//		);
+//
+//		// 数据重塑为2D向量
+//		int newRows = n_RX * 2;
+//		int newCols = adcData.size() / newRows;
+//		std::vector<std::vector<short>> reshapedData(newRows, std::vector<short>(newCols));
+//
+//		for (int i = 0; i < adcData.size(); ++i) {
+//			int row = i % newRows;
+//			int col = i / newRows;
+//			reshapedData[row][col] = adcData[i];
+//		}
+//
+//		// 转换为复数形式并填充到data_radar
+//		data_radar.resize(n_RX);
+//		for (int i = 0; i < n_RX; ++i) {
+//			data_radar[i].resize(n_samples);
+//			for (int j = 0; j < n_samples; ++j) {
+//				data_radar[i][j].resize(n_chirps);
+//				for (int k = 0; k < n_chirps; ++k) {
+//					data_radar[i][j][k].resize(n_frames);
+//					for (int l = 0; l < n_frames; ++l) {
+//						int idx = j + k * n_samples + l * n_samples * n_chirps;
+//						data_radar[i][j][k][l] = Complex(reshapedData[i][idx], reshapedData[i + 4][idx]);
+//					}
+//				}
+//			}
+//		}
+//		// 查看adcdata的形状
+//		//std::cout << "ADC数据的形状为：" << adcData.size() << std::endl;//3916800
+//
+//		return data_radar;
+//	}
+//
+//	/**
+//	 * @brief 从压缩的轮廓中提取特征向量。
+//	 *
+//	 * 此函数从三个压缩的轮廓：range_profile_compressed、speed_profile_compressed 和 angle_profile_compressed
+//	 * 中提取特征向量。每个轮廓包含多个帧，每个帧包含多个数据点。函数将每个轮廓的数据点连接成单独的特征向量。
+//	 *
+//	 * @param range_profile_compressed 包含压缩的距离轮廓的二维向量。
+//	 * @param speed_profile_compressed 包含压缩的速度轮廓的二维向量。
+//	 * @param angle_profile_compressed 包含压缩的角度轮廓的二维向量。
+//	 * @return 包含三个特征向量（距离、速度、角度）的二维向量。
+//	 */
+//	std::vector<std::vector<float>> extract_feature_vector(
+//		std::vector<std::vector<float>>& range_profile_compressed,
+//		std::vector<std::vector<float>>& speed_profile_compressed,
+//		std::vector<std::vector<float>>& angle_profile_compressed
+//	)
+//	{
+//		std::vector<std::vector<float>> feature_vector(3);
+//
+//		// 提取 range_profile_compressed
+//		for (int i = 0; i < n_frames; ++i) {
+//			for (int j = 0; j < N; ++j) {
+//				feature_vector[0].push_back(range_profile_compressed[i][j]);
+//			}
+//		}
+//
+//		// 提取 speed_profile_compressed
+//		for (int i = 0; i < n_frames; ++i) {
+//			for (int j = 0; j < M; ++j) {
+//				feature_vector[1].push_back(speed_profile_compressed[i][j]);
+//			}
+//		}
+//
+//		// 提取 angle_profile_compressed
+//		for (int i = 0; i < n_frames; ++i) {
+//			for (int j = 0; j < Q; ++j) {
+//				feature_vector[2].push_back(angle_profile_compressed[i][j]);
+//			}
+//		}
+//
+//		return feature_vector;
+//	}
+//
+//	/**
+//	 * @brief 从特征向量中重构压缩的轮廓。
+//	 *
+//	 * 此函数从三个特征向量中重构压缩的轮廓：range_profile_compressed、speed_profile_compressed 和 angle_profile_compressed。
+//	 * 每个轮廓包含多个帧，每个帧包含多个数据点。
+//	 *
+//	 * @param feature_vector 包含三个特征向量（距离、速度、角度）的二维向量。
+//	 * @param n_frames 每个轮廓中的帧数（输入）。
+//	 * @param N 每个距离轮廓帧中的数据点数（输入）。
+//	 * @param M 每个速度轮廓帧中的数据点数（输入）。
+//	 * @param Q 每个角度轮廓帧中的数据点数（输入）。
+//	 * @param[out] range_profile_compressed 重构的距离轮廓。
+//	 * @param[out] speed_profile_compressed 重构的速度轮廓。
+//	 * @param[out] angle_profile_compressed 重构的角度轮廓。
+//	 */
+//	void reconstruct_profiles(
+//		const std::vector<std::vector<float>>& feature_vector,
+//		int n_frames, int N, int M, int Q,
+//		std::vector<std::vector<float>>& range_profile_compressed,
+//		std::vector<std::vector<float>>& speed_profile_compressed,
+//		std::vector<std::vector<float>>& angle_profile_compressed)
+//	{
+//		// 清空原始轮廓
+//		range_profile_compressed.clear();
+//		speed_profile_compressed.clear();
+//		angle_profile_compressed.clear();
+//
+//		// 重构 range_profile_compressed
+//		for (int i = 0; i < n_frames; ++i) {
+//			std::vector<float> frame_data(N);
+//			for (int j = 0; j < N; ++j) {
+//				frame_data[j] = feature_vector[0][i * N + j];
+//			}
+//			range_profile_compressed.push_back(frame_data);
+//		}
+//
+//		// 重构 speed_profile_compressed
+//		for (int i = 0; i < n_frames; ++i) {
+//			std::vector<float> frame_data(M);
+//			for (int j = 0; j < M; ++j) {
+//				frame_data[j] = feature_vector[1][i * M + j];
+//			}
+//			speed_profile_compressed.push_back(frame_data);
+//		}
+//
+//		// 重构 angle_profile_compressed
+//		for (int i = 0; i < n_frames; ++i) {
+//			std::vector<float> frame_data(Q);
+//			for (int j = 0; j < Q; ++j) {
+//				frame_data[j] = feature_vector[2][i * Q + j];
+//			}
+//			angle_profile_compressed.push_back(frame_data);
+//		}
+//	}
+//
+//	/**
+//	 * @brief 从二进制文件中读取雷达原始数据，并将其重塑为指定形状的复数形式。
+//	 *
+//	 * @param filename    输入的二进制文件名。
+//	 * @param data_radar  存储转换后的复数雷达数据的四维向量，形状为 (n_RX, n_samples, n_chirps, n_frames)。
+//	 *
+//	 * @details
+//	 * - 从指定的二进制文件中读取原始ADC数据。
+//	 * - 重塑ADC数据为形状为 (numLanes*2, -1) 的二维数据。
+//	 * - 将二维数据转换为复数形式，并存储在一个新的二维向量中。
+//	 * - 将转换后的数据复制到指定的四维数据结构中。
+//	 */
+//	void read_data(const std::string& filename, std::vector<std::vector<std::vector<std::vector<Complex>>>>& data_radar) {
+//		// 读取文件
+//		std::ifstream file(filename, std::ios::binary);
+//		if (!file.is_open()) {
+//			std::cerr << "打开文件错误！" << std::endl;
+//			return;
+//		}
+//
+//		// 读取ADC数据到vector
+//		std::vector<short> adcData(n_RX * 2 * n_samples * n_chirps * n_frames);
+//		file.read(reinterpret_cast<char*>(adcData.data()), adcData.size() * sizeof(short));
+//		file.close();
+//
+//		data_radar = reshape_data(adcData);
+//	}
+//
+//	/**
+//	 * @brief 对给定的FFT数据进行移位操作，将零频率分量移到中心。
+//	 *
+//	 * @param data  待处理的复数数组，存储FFT的实部和虚部。
+//	 * @param N     数组的长度。
+//	 */
+//	void fftshift(fftw_complex*& data, int N) {
+//		fftw_complex* temp = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+//		for (int i = 0; i < N; ++i) {
+//			temp[i][0] = data[i][0];
+//			temp[i][1] = data[i][1];
+//		}
+//		for (int i = 0; i < N; ++i) {
+//			data[i][0] = temp[(i + N / 2) % N][0];
+//			data[i][1] = temp[(i + N / 2) % N][1];
+//		}
+//		fftw_free(temp);
+//	}
+//
+//	/**
+//	 * @brief 查找二维数据的最大值。
+//	 *
+//	 * @tparam T 数据类型
+//	 * @param data_2d 二维数据
+//	 * @return 最大值
+//	 */
+//	template<typename T>
+//	T find_max_value(const std::vector<std::vector<T>>& data_2d) {
+//		T max_value = 0;
+//		for (const auto& row : data_2d) {
+//			for (T value : row) {
+//				max_value = max(max_value, value);
+//			}
+//		}
+//		return max_value;
+//	}
+//
+//	/**
+//	 * @brief 将二维数据压缩并转换为图像数据范围(0-255)。
+//	 *
+//	 * @tparam T 数据类型
+//	 * @param data_2d 二维数据
+//	 * @param image_data_gray 图像数据数组
+//	 */
+//	template<typename T>
+//	void compress_to_image_data(const std::vector<std::vector<T>>& data_2d, unsigned char*& image_data_gray) {
+//		int ccnt = 0;
+//		T max_value = find_max_value(data_2d);
+//		for (const auto& row : data_2d) {
+//			for (T value : row) {
+//				image_data_gray[ccnt++] = static_cast<unsigned char>(value / max_value * 255);
+//			}
+//		}
+//	}
+//
+//	/**
+//	 * @brief 绘制压缩的数据的热图。
+//	 *
+//	 * @tparam T 数据类型
+//	 * @param data2d 二维向量，包含压缩的数据
+//	 * @param rows 数据的行数
+//	 * @param columns 数据的列数
+//	 * @param cmap 颜色映射名称
+//	 * @param title 图像标题
+//	 */
+//	template<typename T>
+//	void plot_data2d(const std::vector<std::vector<T>>& data2d, int rows, int columns, const std::string& cmap = "jet", const std::string& title = "Image") {
+//		unsigned char* image_data_gray = new unsigned char[rows * columns];
+//
+//		// 转换compressed_data到图像数据范围(0-255)
+//		compress_to_image_data(data2d, image_data_gray);
+//
+//		// 设置imshow参数并显示图像
+//		std::map<std::string, std::string> imshow_params = {
+//			{"cmap", cmap},
+//			{"aspect", "auto"}
+//		};
+//		plt::imshow(image_data_gray, rows, columns, 1, imshow_params);
+//		plt::title(title);
+//
+//		// 释放动态分配的内存
+//		delete[] image_data_gray;
+//	}
+//
+//	/**
+// * @brief 提取特征向量中的range_profile, speed_profile, angle_profile。
+// *
+// * @tparam T 数据类型
+// * @param feature_vector 特征向量，包含range_profile, speed_profile, angle_profile
+// * @param n_frames 帧数
+// * @param N range_profile的列数
+// * @param M speed_profile的列数
+// * @param Q angle_profile的列数
+// * @return std::tuple<std::vector<std::vector<T>>, std::vector<std::vector<T>>, std::vector<std::vector<T>>>
+// *         返回range_profile, speed_profile, angle_profile的二维向量
+// */
+//	template<typename T>
+//	std::tuple<std::vector<std::vector<T>>, std::vector<std::vector<T>>, std::vector<std::vector<T>>>
+//		extract_profiles(const std::vector<std::vector<T>>& feature_vector, int n_frames, int N, int M, int Q) {
+//		std::vector<std::vector<T>> range_profile(n_frames, std::vector<T>(N));
+//		std::vector<std::vector<T>> speed_profile(n_frames, std::vector<T>(M));
+//		std::vector<std::vector<T>> angle_profile(n_frames, std::vector<T>(Q));
+//
+//		for (int i = 0; i < n_frames; ++i) {
+//			for (int j = 0; j < N; ++j) {
+//				range_profile[i][j] = feature_vector[0][i * N + j];
+//			}
+//		}
+//
+//		for (int i = 0; i < n_frames; ++i) {
+//			for (int j = 0; j < M; ++j) {
+//				speed_profile[i][j] = feature_vector[1][i * M + j];
+//			}
+//		}
+//
+//		for (int i = 0; i < n_frames; ++i) {
+//			for (int j = 0; j < Q; ++j) {
+//				angle_profile[i][j] = feature_vector[2][i * Q + j];
+//			}
+//		}
+//
+//		return std::make_tuple(range_profile, speed_profile, angle_profile);
+//	}
+//
+//	/**
+//	 * @brief 绘制range_profile_compressed的热图
+//	 *
+//	 * @param range_profile_compressed 二维向量，包含压缩的range profile数据
+//	 * @param n_frames 数据的行数
+//	 * @param N 数据的列数
+//	 */
+//	void plot_range_profile_compressed(const std::vector<std::vector<float>>& range_profile_compressed, int n_frames, int N) {
+//		plot_data2d(range_profile_compressed, n_frames, N, "jet", "range_profile_compressed");
+//	}
+//
+//	void plot_speed_profile_compressed(const std::vector<std::vector<float>>& speed_profile_compressed, int n_frames, int M) {
+//		plot_data2d(speed_profile_compressed, n_frames, M, "jet", "speed_profile_compressed");
+//	}
+//
+//	void plot_angle_profile_compressed(const std::vector<std::vector<float>>& angle_profile_compressed, int n_frames, int Q) {
+//		plot_data2d(angle_profile_compressed, n_frames, Q, "jet", "angle_profile_compressed");
+//	}
+//
+//	// 从feature_vector中提取range_profile, speed_profile, angle_profile,然后进行图像绘制
+//	void plot_features(const std::vector<std::vector<float>>& feature_vector) {
+//		auto [range_profile, speed_profile, angle_profile] = extract_profiles<float>(feature_vector, n_frames, N, M, Q);
+//
+//		plt::subplot(1, 3, 1);
+//		plot_range_profile_compressed(range_profile, n_frames, N);
+//		plt::subplot(1, 3, 2);
+//		plot_speed_profile_compressed(speed_profile, n_frames, M);
+//		plt::subplot(1, 3, 3);
+//		plot_angle_profile_compressed(angle_profile, n_frames, Q);
+//	}
+//
+//	/**
+//	 * @brief 对给定的雷达数据进行特征提取。
+//	 *
+//	 * @param data_radar       从二进制文件中读取的雷达数据。
+//	 * @param clutter_removal  杂波去除方法，默认为空。
+//	 * @param range_profile    存储range_profile的向量.
+//	 * @param speed_profile    存储speed_profile的向量.
+//	 * @param angle_profile    存储angle_profile的向量.
+//	 *
+//	 * @return 一个包含三个特征向量的二维向量，分别为range_profile_compressed, speed_profile_compressed, angle_profile_compressed。
+//	 */
+//	std::vector<std::vector<float>> feature_extraction(const std::vector<std::vector<std::vector<std::vector<Complex>>>>& data_radar, const std::string& clutter_removal)
+//	{
+//		// 定义range_profile
+//		std::vector<std::vector<std::vector<fftw_complex*>>> range_profile(
+//			n_RX, std::vector<std::vector<fftw_complex*>>(
+//				n_chirps, std::vector<fftw_complex*>(n_frames)
+//			)
+//		);
+//
+//		// 定义speed_profile
+//		std::vector<std::vector<std::vector<fftw_complex*>>> speed_profile(
+//			n_RX, std::vector<std::vector<fftw_complex*>>(
+//				N, std::vector<fftw_complex*>(n_frames)
+//			)
+//		);
+//
+//		// 定义angle_profile
+//		std::vector<std::vector<std::vector<fftw_complex*>>> angle_profile(
+//			N, std::vector<std::vector<fftw_complex*>>(
+//				M, std::vector<fftw_complex*>(n_frames)
+//			)
+//		);
+//
+//		// 创建in
+//		std::vector<std::vector<std::vector<fftw_complex*>>> in(
+//			n_RX, std::vector<std::vector<fftw_complex*>>(
+//				n_chirps, std::vector<fftw_complex*>(n_frames)
+//			)
+//		);
+//
+//		// 为range_profile, speed_profile, angle_profile分配内存
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < n_chirps; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					range_profile[i][j][k] = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+//				}
+//			}
+//		}
+//
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < N; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					speed_profile[i][j][k] = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * M);
+//				}
+//			}
+//		}
+//		for (int i = 0; i < N; ++i) {
+//			for (int j = 0; j < M; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					angle_profile[i][j][k] = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * Q);
+//				}
+//			}
+//		}
+//
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < n_chirps; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					in[i][j][k] = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * n_samples);
+//				}
+//			}
+//		}
+//
+//		// 将数据复制到in中
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < n_chirps; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					for (int l = 0; l < n_samples; ++l) {
+//						in[i][j][k][l][0] = data_radar[i][l][j][k].real();
+//						in[i][j][k][l][1] = data_radar[i][l][j][k].imag();
+//					}
+//				}
+//			}
+//		}
+//
+//		// 执行FFT
+//
+//		fftw_plan plan = fftw_plan_dft_1d(n_samples, in[0][0][0], range_profile[0][0][0], FFTW_FORWARD, FFTW_ESTIMATE);
+//
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < n_chirps; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					fftw_execute_dft(plan, in[i][j][k], range_profile[i][j][k]);
+//				}
+//			}
+//		}
+//		fftw_destroy_plan(plan);
+//
+//		// 杂波去除
+//		if (clutter_removal == "avg") {
+//			// range_profile(n_RX, n_chirps, n_frames, N) -> range_profile(n_RX, n_chirps, n_frames, N)
+//			//range_profile = range_profile - np.mean(range_profile, axis = 3)[:, : , np.newaxis, : ]
+//			for (int i = 0; i < n_frames; ++i) {
+//				for (int j = 0; j < n_RX; ++j) {
+//					for (int k = 0; k < N; ++k) {
+//						double mean_real = 0;
+//						double mean_imag = 0;
+//						for (int l = 0; l < n_chirps; ++l) {
+//							mean_real += range_profile[j][l][i][k][0];
+//							mean_imag += range_profile[j][l][i][k][1];
+//						}
+//						mean_real /= n_chirps;
+//						mean_imag /= n_chirps;
+//						for (int l = 0; l < n_chirps; ++l) {
+//							range_profile[j][l][i][k][0] -= mean_real;
+//							range_profile[j][l][i][k][1] -= mean_imag;
+//						}
+//					}
+//				}
+//			}
+//		}
+//		else if (clutter_removal == "mti") {
+//			// [ ] 实现移动目标指示（MTI）滤波
+//		}
+//
+//		// 速度轮廓的FFT(range_profile(n_RX, n_chirps, n_frames) -> speed_profile(n_RX, M, n_frames))
+//		plan = fftw_plan_dft_1d(M, speed_profile[0][0][0], speed_profile[0][0][0], FFTW_FORWARD, FFTW_ESTIMATE);
+//		fftw_complex* temp = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+//
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < n_frames; ++j) {
+//				for (int k = 0; k < N; ++k) {
+//					for (int l = 0; l < M; ++l) {
+//						temp[l][0] = range_profile[i][l][j][k][0];
+//						temp[l][1] = range_profile[i][l][j][k][1];
+//					}
+//					fftw_execute_dft(plan, temp, speed_profile[i][k][j]);
+//					fftshift(speed_profile[i][k][j], M);
+//				}
+//			}
+//		}
+//		fftw_free(temp);
+//
+//		plan = fftw_plan_dft_1d(Q, angle_profile[0][0][0], angle_profile[0][0][0], FFTW_FORWARD, FFTW_ESTIMATE);
+//		// 临时变量
+//		temp = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * M);
+//
+//		// 角度轮廓的FFT(speed_profile(n_RX, N, n_frames) -> angle_profile(N, M, n_frames))
+//		for (int i = 0; i < N; ++i) {
+//			for (int j = 0; j < n_frames; ++j) {
+//				for (int k = 0; k < M; ++k) {
+//					for (int l = 0; l < n_RX; ++l) {
+//						temp[l][0] = speed_profile[l][i][j][k][0];
+//						temp[l][1] = speed_profile[l][i][j][k][1];
+//					}
+//					fftw_execute_dft(plan, temp, angle_profile[i][k][j]);
+//					fftshift(angle_profile[i][k][j], Q);
+//				}
+//			}
+//		}
+//		fftw_free(temp);
+//
+//		// 压缩维度
+//		std::vector<std::vector<float>> range_profile_compressed(n_frames, std::vector<float>(N));
+//		std::vector<std::vector<float>> speed_profile_compressed(n_frames, std::vector<float>(M));
+//		std::vector<std::vector<float>> angle_profile_compressed(n_frames, std::vector<float>(Q));
+//
+//		// 压缩range_profile
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < n_chirps; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					for (int l = 0; l < N; ++l) {
+//						range_profile_compressed[k][l] += abs(Complex(range_profile[i][j][k][l][0], range_profile[i][j][k][l][1]));
+//					}
+//				}
+//			}
+//		}
+//
+//		// 压缩speed_profile(n_RX, N, n_frames) -> speed_profile_compressed(n_frames, M)
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < N; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					for (int l = 0; l < M; ++l) {
+//						speed_profile_compressed[k][l] += abs(Complex(speed_profile[i][j][k][l][0], speed_profile[i][j][k][l][1]));
+//					}
+//				}
+//			}
+//		}
+//
+//		// 压缩angle_profile(N, M, n_frames) -> angle_profile_compressed(n_frames, Q)
+//		for (int i = 0; i < N; ++i) {
+//			for (int j = 0; j < M; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					for (int l = 0; l < Q; ++l) {
+//						angle_profile_compressed[k][l] += abs(Complex(angle_profile[i][j][k][l][0], angle_profile[i][j][k][l][1]));
+//					}
+//				}
+//			}
+//		}
+//
+//		std::vector<std::vector<float>> feature_vector = extract_feature_vector(range_profile_compressed, speed_profile_compressed, angle_profile_compressed);
+//
+//		//释放内存
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < n_chirps; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					fftw_free(range_profile[i][j][k]);
+//				}
+//			}
+//		}
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < N; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					fftw_free(speed_profile[i][j][k]);
+//				}
+//			}
+//		}
+//		for (int i = 0; i < N; ++i) {
+//			for (int j = 0; j < M; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					fftw_free(angle_profile[i][j][k]);
+//				}
+//			}
+//		}
+//		for (int i = 0; i < n_RX; ++i) {
+//			for (int j = 0; j < n_chirps; ++j) {
+//				for (int k = 0; k < n_frames; ++k) {
+//					fftw_free(in[i][j][k]);
+//				}
+//			}
+//		}
+//
+//		return feature_vector;
+//	}
+//
+//	/**
+//	* @brief 对给定的二进制文件进行特征提取。
+//	*
+//	* @param filename 输入的二进制文件名。
+//	* @param clutter_removal 杂波去除方法，默认为空。
+//	* @return 一个包含三个特征向量的二维向量，分别为range_profile_compressed, speed_profile_compressed, angle_profile_compressed。
+//	*/
+//	std::vector<std::vector<float>> feature_extraction_single(const string& filename, const string& clutter_removal = "")
+//	{
+//		// 定义data_radar
+//		std::vector<std::vector<std::vector<std::vector<Complex>>>> data_radar(
+//			n_RX, std::vector<std::vector<std::vector<Complex>>>(
+//				n_samples, std::vector<std::vector<Complex>>(
+//					n_chirps, std::vector<Complex>(n_frames)
+//				)
+//			)
+//		);
+//
+//		// 给data_radar赋值
+//		read_data(filename, data_radar);
+//
+//		return feature_extraction(data_radar, clutter_removal);
+//	}
+//}
+//
+//int main() {
+//    //从文件中提取data_radar
+//    std::vector<std::vector<std::vector<std::vector<mmwave_handle::Complex>>>> data_radar;
+//    mmwave_handle::read_data("K:/dataset/1000/1/1.bin", data_radar);
+//    // 特征提取
+//    std::vector<std::vector<float>> feature_vector = mmwave_handle::feature_extraction(data_radar, "avg");
+//
+//	//plt::figure_size(1200, 400);
+// //   mmwave_handle::plot_features(feature_vector);
+//
+//	auto [range_profile, speed_profile, angle_profile] = mmwave_handle::extract_profiles<float>(feature_vector, mmwave_handle::n_frames, mmwave_handle::N, mmwave_handle::M, mmwave_handle::Q);
+//	// 绘制压缩的数据的热图
+//	plt::figure_size(1200, 400);
+//	plt::subplot(1, 3, 1);
+//	mmwave_handle::plot_range_profile_compressed(range_profile, mmwave_handle::n_frames, mmwave_handle::N);
+//	plt::subplot(1, 3, 2);
+//	mmwave_handle::plot_speed_profile_compressed(speed_profile, mmwave_handle::n_frames, mmwave_handle::M);
+//	plt::subplot(1, 3, 3);
+//	mmwave_handle::plot_angle_profile_compressed(angle_profile, mmwave_handle::n_frames, mmwave_handle::Q);
+//	plt::show();
+//    return 0;
+//}
